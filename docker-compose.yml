@@ -1,0 +1,45 @@
+version: '3.8'
+
+# Postgres is intentionally NOT run here — this project connects to an
+# existing, IP-reachable Postgres instance (see DB_HOST/DB_PORT in .env)
+# rather than a Dockerized one. Only Redis and the app itself run via compose.
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # .env's REDIS_HOST/DB_HOST are typically "localhost" for running the
+      # app directly on the host without Docker. Inside this compose
+      # network, "localhost" means the container itself, not your machine —
+      # so both need overriding here: REDIS_HOST to the compose service name,
+      # and DB_HOST to Docker Desktop's host-machine alias. If your Postgres
+      # instead lives on a separate, genuinely remote host, remove the
+      # DB_HOST line below and let .env's real hostname/IP pass through.
+      REDIS_HOST: redis
+      DB_HOST: host.docker.internal
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      # Deliberately a literal, not "${PORT:-3000}": Compose's ${VAR}
+      # substitution reads the calling shell's environment first, and on
+      # machines with an unrelated system-wide PORT variable already set
+      # (seen on this box — leftover from another project, pointing at 5432,
+      # which collides with a native Postgres already listening there) that
+      # silently wins over .env's PORT=3000. If you genuinely need a
+      # different host port, change the literal below directly.
+      - '3000:3000'
