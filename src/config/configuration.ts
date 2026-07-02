@@ -38,6 +38,9 @@ export interface AppConfig {
     email: string;
     passwordHash: string;
   };
+  google: {
+    clientId: string | null;
+  };
 }
 
 // Values that ship in .env.example — booting in production with any of these
@@ -125,6 +128,10 @@ export default (): AppConfig => {
     admin: {
       email: requireEnv('ADMIN_EMAIL'),
       passwordHash: requireEnv('ADMIN_PASSWORD_HASH'),
+    },
+    google: {
+      // Optional: unset means Google Sign-In is disabled (endpoint returns 501).
+      clientId: process.env.GOOGLE_CLIENT_ID || null,
     },
   };
 };

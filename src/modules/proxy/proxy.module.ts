@@ -25,8 +25,10 @@ export class ProxyModule implements NestModule {
     consumer
       .apply(ProxyMiddleware)
       .exclude(
-        { path: 'auth/register', method: RequestMethod.ALL },
-        { path: 'auth/login', method: RequestMethod.ALL },
+        { path: 'api/auth/register', method: RequestMethod.ALL },
+        { path: 'api/auth/login', method: RequestMethod.ALL },
+        { path: 'api/auth/refresh-token', method: RequestMethod.ALL },
+        { path: 'api/auth/google', method: RequestMethod.ALL },
         { path: 'middleware/(.*)', method: RequestMethod.ALL },
       )
       .forRoutes({ path: '*', method: RequestMethod.ALL });

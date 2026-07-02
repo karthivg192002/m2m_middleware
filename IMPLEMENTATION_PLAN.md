@@ -30,18 +30,22 @@ Client
 ┌──────────────────────────────────────────────────────────┐
 │                  Middleware (This App)                    │
 │                                                          │
-│  POST /auth/register  ──► Intercept:                     │
+│  POST /api/auth/register  ──► Intercept:                 │
 │    • if tenant doesn't exist → create it (from request)  │
 │    • insert (username, tenant_id) into user_tenant_mapping│
 │    • strip tenantCode/apiUrl from body                   │
 │    • forward cleaned body to main service                │
-│    • return main service response unchanged              │
+│    • if main service auto-logs-in and returns a token,   │
+│      swap it for a middleware session (same as login)    │
+│    • otherwise return main service response unchanged    │
 │                                                          │
-│  POST /auth/login     ──► Intercept:                     │
+│  POST /api/auth/login     ──► Intercept:                 │
 │    • look up username in user_tenant_mapping → api_url   │
 │    • forward credentials to {api_url}/auth/login         │
 │    • embed api_url + upstream token into middleware JWT  │
-│    • return middleware JWT to client                     │
+│    • swap the token in-place inside the upstream response │
+│      envelope (preserves user/etc. — see below)          │
+│    • return the reshaped response to client               │
 │                                                          │
 │  ALL other routes     ──► Transparent Pass-Through:      │
 │    • extract api_url from middleware JWT                 │
@@ -100,7 +104,7 @@ That is the complete schema. No passwords. No profiles. No roles. No external ID
 The first user to register for a tenant supplies the `apiUrl` in their request. All subsequent users from the same tenant supply only `tenantCode` — the tenant record already exists.
 
 ```
-POST /auth/register
+POST /api/auth/register
 {
   "email":      "john@acme.com",
   "password":   "secret",
@@ -138,7 +142,11 @@ POST /auth/register
 4. POST mapped body → {api_url}{REGISTER_PATH}
    Body forwarded: { "email": "john@acme.com", "password": "secret", "instituteCode": "acme" }
 
-5. Return main service response to client as-is (status + body unchanged)
+5. If the main service's register response contains a token at UPSTREAM_TOKEN_PATH
+   (some auto-log-in the new user), swap it for a middleware session — identical
+   to step 3-6 of the Login Flow below — so the client never receives a raw
+   upstream token it can't use against the proxy. Otherwise return the main
+   service response to client as-is (status + body unchanged).
 ```
 
 **What the main service receives (example matching a main service that itself requires a tenant/institute code):**
@@ -154,7 +162,7 @@ POST /api/auth/register
 ## Login Flow — apiUrl Resolution
 
 ```
-POST /auth/login
+POST /api/auth/login
 {
   "email":    "john@acme.com",
   "password": "secret"
@@ -196,10 +204,20 @@ POST /auth/login
    SET session:{jti} { apiUrl, upstreamToken } EX 900
    SET refresh:{refreshJti} { userId, tenantId } EX 604800   ← enables refresh-token revocation on logout
 
-6. Return to client:
+6. Return to client — the main service's own response envelope, unchanged
+   except the token field(s) (at UPSTREAM_TOKEN_PATH / UPSTREAM_REFRESH_TOKEN_PATH)
+   are overwritten with the middleware's own tokens. Anything else the main
+   service returned alongside the token (e.g. a `user` object) passes through
+   untouched, so clients written against the main service's own response shape
+   don't need to change how they parse it:
    {
-     "accessToken":  "<middleware_jwt>",       // carries jti, no secret payload
-     "refreshToken": "<refresh_jwt>"           // carries refreshJti only
+     "success": true,
+     "message": "Login successful",
+     "data": {
+       "user": { ... },                        // passed through unchanged
+       "accessToken":  "<middleware_jwt>",      // carries jti, no secret payload
+       "refreshToken": "<refresh_jwt>"          // carries refreshJti only
+     }
    }
 ```
 
@@ -257,11 +275,20 @@ Main service receives:
 ## Route Priority
 
 ```
-/middleware/admin/*     → Middleware admin module  (never forwarded)
-POST /auth/register     → Auth module — intercept  (env-configurable path)
-POST /auth/login        → Auth module — intercept  (env-configurable path)
-/**                     → Proxy middleware          (transparent pass-through)
+/middleware/admin/*         → Middleware admin module  (never forwarded)
+POST /api/auth/register     → Auth module — intercept  (upstream target is env-configurable via REGISTER_PATH)
+POST /api/auth/login        → Auth module — intercept  (upstream target is env-configurable via LOGIN_PATH)
+POST /api/auth/refresh-token → Auth module — compat alias for POST /middleware/auth/refresh
+POST /api/auth/google       → Auth module — verify-only (see "Google Sign-In" below)
+/**                         → Proxy middleware          (transparent pass-through)
 ```
+
+The `/api` prefix on the client-facing auth paths matches this deployment's
+frontends (they already call their main service at `/api/auth/*`) — it is not
+inherent to the middleware's design, just chosen to match. A different
+deployment's frontends could use a different prefix; the client-facing paths
+are set in `auth.controller.ts` route decorators, independent of
+`REGISTER_PATH`/`LOGIN_PATH` (which only control the upstream forwarding target).
 
 Admin paths are prefixed with `/middleware/` so they can never collide with any main service route.
 
@@ -340,16 +367,33 @@ meet-to-manage-middleware/
 
 ### Intercepted Auth
 
-| Method | Path           | Description                                        |
-|--------|----------------|----------------------------------------------------|
-| POST   | /auth/register | Create tenant (if new) + mapping, forward to main  |
-| POST   | /auth/login    | Resolve apiUrl, forward creds, return MW JWT       |
+| Method | Path                    | Description                                                  |
+|--------|-------------------------|----------------------------------------------------------------|
+| POST   | /api/auth/register      | Create tenant (if new) + mapping, forward to main, swap token if auto-issued |
+| POST   | /api/auth/login         | Resolve apiUrl, forward creds, return reshaped response with MW tokens |
+| POST   | /api/auth/refresh-token | Compat alias for `/middleware/auth/refresh`, response wrapped in `{data:{...}}` |
+| POST   | /api/auth/google        | Verify Google ID token + resolve tenant; **501** until main service supports it — see [Google Sign-In](#google-sign-in--verify-only) |
 
 ### Pass-Through
 
 | Method | Path | Description                                    |
 |--------|------|------------------------------------------------|
 | ALL    | /**  | JWT validated, forwarded to tenant's api_url   |
+
+---
+
+## Google Sign-In — Verify-Only
+
+`POST /api/auth/google` — `{ idToken, tenantCode }`
+
+This endpoint does real, complete work up to a hard stop:
+
+1. Verifies the Google ID token's signature, issuer, and audience (`GOOGLE_CLIENT_ID`) via `google-auth-library`.
+2. Confirms the email is present and Google-verified (`email_verified: true`).
+3. Resolves `tenantCode` to an active `TenantMaster` row (same multi-tenant model as register/login — a Google token proves *identity*, not *which tenant*).
+4. **Stops here and returns `501`.** There is no step 5 that mints a working session, because the main service only authenticates via email+password — it has no endpoint to accept a pre-verified identity and hand back a session. Per this project's Core Constraint #1 (no main-service changes), that endpoint does not exist, so this method does not fabricate one.
+
+See `GOOGLE_SIGNIN_AND_MIDDLEWARE_INTEGRATION.md` (repo root of `online-class-management-platform`) for the exact main-service endpoint spec that would let this finish the job, and for what changed in each frontend.
 
 ---
 
@@ -472,6 +516,10 @@ ALLOW_PRIVATE_API_URLS=false
 # Middleware admin credentials (bootstrap) — ADMIN_PASSWORD_HASH is a bcrypt hash, never plaintext
 ADMIN_EMAIL=admin@internal.com
 ADMIN_PASSWORD_HASH=$2b$12$replace_with_a_real_bcrypt_hash
+
+# Google Sign-In — OAuth 2.0 Web Client ID (Google Cloud Console > APIs & Services > Credentials)
+# Unset disables POST /api/auth/google (it responds 400). See "Google Sign-In" section above.
+GOOGLE_CLIENT_ID=
 ```
 
 ---

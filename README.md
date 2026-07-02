@@ -7,8 +7,10 @@ requiring any changes to those backends.
 Clients talk to this middleware exactly as they would talk to the main
 service directly. The middleware:
 
-- Intercepts `POST /auth/register` and `POST /auth/login`, resolving which
-  tenant (and therefore which main-service deployment) a user belongs to.
+- Intercepts `POST /api/auth/register` and `POST /api/auth/login`, resolving
+  which tenant (and therefore which main-service deployment) a user belongs
+  to. (The `/api` prefix matches this deployment's frontends; see
+  `IMPLEMENTATION_PLAN.md` "Route Priority".)
 - Auto-creates a tenant record on first registration — no separate admin
   step is needed to onboard a new tenant.
 - Transparently proxies every other request to that tenant's main service,
@@ -29,10 +31,10 @@ Client
 ┌──────────────────────────────────────────────────────────┐
 │                  Middleware (this app)                    │
 │                                                          │
-│  POST /auth/register  ──► resolve/create tenant,          │
+│  POST /api/auth/register  ──► resolve/create tenant,      │
 │                            forward cleaned body to main   │
 │                                                          │
-│  POST /auth/login     ──► resolve tenant, forward creds,  │
+│  POST /api/auth/login     ──► resolve tenant, forward creds,  │
 │                            issue our own JWT (no upstream │
 │                            secret inside it — see below)  │
 │                                                          │
@@ -198,7 +200,7 @@ The first user of a new tenant registers with both their own credentials
 *and* enough info for the middleware to create a tenant record:
 
 ```bash
-curl -X POST http://localhost:3000/auth/register \
+curl -X POST http://localhost:3000/api/auth/register \
   -H "Content-Type: application/json" \
   -d '{
     "email": "john@acme.com",
@@ -247,7 +249,7 @@ JWT (`JWT_EXPIRES_IN`, default 15m) naturally expires.
 Once a tenant exists and a user is registered, everyday traffic looks like
 this:
 
-1. **Login** — `POST /auth/login` with `{ email, password }`. The
+1. **Login** — `POST /api/auth/login` with `{ email, password }`. The
    middleware resolves the tenant from its own `user_tenant_mapping` table,
    forwards the credentials to that tenant's main service, and — on
    success — mints its own short-lived JWT + refresh token. The main

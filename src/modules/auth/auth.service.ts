@@ -3,13 +3,14 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
+import { OAuth2Client } from 'google-auth-library';
 import { Repository } from 'typeorm';
 import { AppConfig } from '../../config/configuration';
 import { TenantMaster } from '../../database/entities/tenant-master.entity';
 import { UserTenantMapping } from '../../database/entities/user-tenant-mapping.entity';
 import { RedisService } from '../../redis/redis.service';
 import { assertPublicHttpsApiUrl } from '../../common/utils/ssrf-guard';
-import { getByDotPath } from '../../common/utils/dot-path';
+import { getByDotPath, setByDotPath } from '../../common/utils/dot-path';
 import { parseDurationToSeconds } from '../../common/utils/duration';
 import {
   extractKnownRegisterFields,
@@ -31,6 +32,8 @@ const UNIQUE_VIOLATION = '23505';
 
 @Injectable()
 export class AuthService {
+  private readonly googleClient = new OAuth2Client();
+
   constructor(
     @InjectRepository(TenantMaster)
     private readonly tenantRepo: Repository<TenantMaster>,
@@ -99,6 +102,27 @@ export class AuthService {
     }
   }
 
+  // Preserves the upstream response envelope (e.g. { success, message, data:
+  // { user, accessToken } }) so clients written against the main service's own
+  // response shape keep working unmodified — only the token value(s) at the
+  // configured dot-path(s) are overwritten with the middleware's own session
+  // tokens. Deep-cloned since upstream.body may be reused by the caller.
+  private swapTokensIntoUpstreamBody(
+    upstreamBody: unknown,
+    intercept: AppConfig['intercept'],
+    session: { accessToken: string; refreshToken: string },
+  ): unknown {
+    const body: Record<string, unknown> =
+      upstreamBody !== null && typeof upstreamBody === 'object' && !Array.isArray(upstreamBody)
+        ? (JSON.parse(JSON.stringify(upstreamBody)) as Record<string, unknown>)
+        : {};
+    setByDotPath(body, intercept.upstreamTokenPath, session.accessToken);
+    if (intercept.upstreamRefreshTokenPath) {
+      setByDotPath(body, intercept.upstreamRefreshTokenPath, session.refreshToken);
+    }
+    return body;
+  }
+
   private buildForwardedBody(
     rawBody: Record<string, unknown>,
     tenantCode: string,
@@ -135,12 +159,42 @@ export class AuthService {
       .execute();
 
     const forwardedBody = this.buildForwardedBody(rawBody, tenant.tenantCode);
-    return this.postJson(`${tenant.apiUrl}${intercept.registerPath}`, forwardedBody);
+    const upstream = await this.postJson(`${tenant.apiUrl}${intercept.registerPath}`, forwardedBody);
+
+    if (upstream.status < 200 || upstream.status >= 300) {
+      return upstream;
+    }
+
+    // Some main services auto-log-in on register and return tokens in the same
+    // response (see IMPLEMENTATION_PLAN.md "Registration Flow"). Those are the
+    // main service's OWN tokens, not a middleware session — swap them for one,
+    // exactly as login() does, so the client never ends up holding a raw
+    // upstream token it can't use against the proxy. If the main service
+    // doesn't return tokens on register, there's nothing to swap; return the
+    // response as-is (original documented behavior).
+    const upstreamToken = getByDotPath(upstream.body, intercept.upstreamTokenPath);
+    if (typeof upstreamToken !== 'string' || upstreamToken.length === 0) {
+      return upstream;
+    }
+
+    const mapping = await this.mappingRepo.findOne({ where: { username: fields.username } });
+    if (!mapping) {
+      // Unreachable in practice — the row was just inserted (or already
+      // existed) above — but fail safe rather than null-deref.
+      return upstream;
+    }
+
+    const upstreamRefreshToken = getByDotPath(upstream.body, intercept.upstreamRefreshTokenPath);
+    const session = await this.issueSession(
+      mapping,
+      tenant,
+      upstreamToken,
+      typeof upstreamRefreshToken === 'string' ? upstreamRefreshToken : undefined,
+    );
+    return { status: upstream.status, body: this.swapTokensIntoUpstreamBody(upstream.body, intercept, session) };
   }
 
-  async login(
-    rawBody: Record<string, unknown>,
-  ): Promise<{ accessToken: string; refreshToken: string } | UpstreamResponse> {
+  async login(rawBody: Record<string, unknown>): Promise<UpstreamResponse> {
     const intercept = this.configService.get('intercept', { infer: true });
     const fields = extractKnownLoginFields(rawBody, intercept);
 
@@ -180,12 +234,64 @@ export class AuthService {
     }
     const upstreamRefreshToken = getByDotPath(upstream.body, intercept.upstreamRefreshTokenPath);
 
-    return this.issueSession(
+    const session = await this.issueSession(
       mapping,
       mapping.tenant,
       upstreamToken,
       typeof upstreamRefreshToken === 'string' ? upstreamRefreshToken : undefined,
     );
+    return { status: 200, body: this.swapTokensIntoUpstreamBody(upstream.body, intercept, session) };
+  }
+
+  // Verifies a Google ID token and resolves it to a tenant — real, functional
+  // work, not a stub. What it deliberately does NOT do is mint a working
+  // session: the main service only understands email+password, and per this
+  // project's hard constraint (no main-service changes — see
+  // IMPLEMENTATION_PLAN.md "Core Constraints") there is no endpoint to hand it
+  // a pre-verified identity and get a session back. Returns 501 rather than
+  // faking one. See GOOGLE_SIGNIN_AND_MIDDLEWARE_INTEGRATION.md for the exact
+  // main-service endpoint spec that would let this method finish the job.
+  async loginWithGoogle(idToken: string, tenantCode: string): Promise<UpstreamResponse> {
+    const google = this.configService.get('google', { infer: true });
+    if (!google.clientId) {
+      throw new BadRequestException(
+        'Google Sign-In is not configured on this deployment (GOOGLE_CLIENT_ID unset).',
+      );
+    }
+
+    let email: string;
+    try {
+      const ticket = await this.googleClient.verifyIdToken({
+        idToken,
+        audience: google.clientId,
+      });
+      const payload = ticket.getPayload();
+      if (!payload?.email || payload.email_verified !== true) {
+        throw new UnauthorizedException('Google account has no verified email');
+      }
+      email = payload.email;
+    } catch (error) {
+      if (error instanceof UnauthorizedException) {
+        throw error;
+      }
+      throw new UnauthorizedException('Invalid Google ID token');
+    }
+
+    const tenant = await this.tenantRepo.findOne({ where: { tenantCode, isActive: true } });
+    if (!tenant) {
+      throw new BadRequestException(`Unknown or inactive tenant "${tenantCode}"`);
+    }
+
+    return {
+      status: 501,
+      body: {
+        success: false,
+        message:
+          'Google Sign-In is verified but not yet usable: the main service has no endpoint to issue a session for a pre-verified identity. See GOOGLE_SIGNIN_AND_MIDDLEWARE_INTEGRATION.md.',
+        email,
+        tenantCode: tenant.tenantCode,
+      },
+    };
   }
 
   private async issueSession(
