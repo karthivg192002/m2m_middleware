@@ -27,6 +27,7 @@ export class ProxyMiddleware implements NestMiddleware {
     const proxy = createProxyMiddleware({
       target,
       changeOrigin: true,
+      xfwd: true, // append this hop to X-Forwarded-For so the main service can see the real client IP, not just this middleware's
       ws: false, // WebSocket/Socket.IO traffic is explicitly out of scope — see IMPLEMENTATION_PLAN.md
       proxyTimeout: 15_000,
       onError: (_err: Error, _req: Request, res: Response) => {

@@ -2,6 +2,7 @@ export interface AppConfig {
   port: number;
   nodeEnv: string;
   corsOrigins: string[];
+  trustProxyHops: number;
   db: {
     host: string;
     port: number;
@@ -92,6 +93,14 @@ export default (): AppConfig => {
       .split(',')
       .map((origin) => origin.trim())
       .filter((origin) => origin.length > 0),
+    // Number of reverse proxies/load balancers in front of THIS app (e.g. 1
+    // for a single nginx/cloud LB terminating TLS before it reaches here).
+    // Controls Express's `trust proxy`, which governs how req.ip (used by
+    // the throttler for per-client rate limiting) is derived from
+    // X-Forwarded-For — wrong value either trusts a spoofable header or
+    // collapses every client to the same IP. 0 = don't trust any hop
+    // (direct-to-internet deployments only).
+    trustProxyHops: parseInt(process.env.TRUST_PROXY_HOPS ?? '0', 10),
     db: {
       host: requireEnv('DB_HOST'),
       port: parseInt(process.env.DB_PORT ?? '5432', 10),

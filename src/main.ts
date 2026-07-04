@@ -14,6 +14,10 @@ async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
   const configService = app.get(ConfigService<AppConfig, true>);
 
+  // Must be set before anything reads req.ip (throttler, logging) — trusts
+  // exactly N hops of X-Forwarded-For, matching TRUST_PROXY_HOPS.
+  app.set('trust proxy', configService.get('trustProxyHops', { infer: true }));
+
   app.use(helmet());
 
   const corsOrigins = configService.get('corsOrigins', { infer: true });
