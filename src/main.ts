@@ -9,6 +9,7 @@ import { AppModule } from './app.module';
 import { AppConfig } from './config/configuration';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
+import { TenantOriginRegistryService } from './common/services/tenant-origin-registry.service';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
@@ -20,9 +21,21 @@ async function bootstrap(): Promise<void> {
 
   app.use(helmet());
 
+  // Static allowlist from CORS_ORIGINS, plus every tenant's own frontendUrl
+  // (captured at registration — see TenantOriginRegistryService) so a newly
+  // self-registered tenant's frontend is allowed immediately, with no env
+  // var change or redeploy needed.
   const corsOrigins = configService.get('corsOrigins', { infer: true });
+  const staticOrigins = new Set(corsOrigins);
+  const originRegistry = app.get(TenantOriginRegistryService);
   app.enableCors({
-    origin: corsOrigins.length > 0 ? corsOrigins : false,
+    origin: (requestOrigin, callback) => {
+      if (!requestOrigin) {
+        callback(null, true); // non-browser requests (curl, server-to-server) send no Origin header
+        return;
+      }
+      callback(null, staticOrigins.has(requestOrigin) || originRegistry.has(requestOrigin));
+    },
     credentials: true,
   });
 

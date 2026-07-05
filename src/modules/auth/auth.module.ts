@@ -6,6 +6,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AppConfig } from '../../config/configuration';
 import { TenantMaster } from '../../database/entities/tenant-master.entity';
 import { UserTenantMapping } from '../../database/entities/user-tenant-mapping.entity';
+import { TenantOriginRegistryService } from '../../common/services/tenant-origin-registry.service';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
@@ -27,7 +28,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy],
-  exports: [AuthService],
+  providers: [AuthService, JwtStrategy, TenantOriginRegistryService],
+  exports: [AuthService, TenantOriginRegistryService],
 })
 export class AuthModule {}

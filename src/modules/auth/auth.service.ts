@@ -9,6 +9,7 @@ import { AppConfig } from '../../config/configuration';
 import { TenantMaster } from '../../database/entities/tenant-master.entity';
 import { UserTenantMapping } from '../../database/entities/user-tenant-mapping.entity';
 import { RedisService } from '../../redis/redis.service';
+import { TenantOriginRegistryService } from '../../common/services/tenant-origin-registry.service';
 import { assertPublicHttpsApiUrl } from '../../common/utils/ssrf-guard';
 import { getByDotPath, setByDotPath } from '../../common/utils/dot-path';
 import { parseDurationToSeconds } from '../../common/utils/duration';
@@ -42,6 +43,7 @@ export class AuthService {
     private readonly configService: ConfigService<AppConfig, true>,
     private readonly jwtService: JwtService,
     private readonly redisService: RedisService,
+    private readonly originRegistry: TenantOriginRegistryService,
   ) {}
 
   private async postJson(url: string, body: unknown): Promise<UpstreamResponse> {
@@ -66,6 +68,7 @@ export class AuthService {
     tenantCode: string,
     tenantName: string | undefined,
     apiUrl: string | undefined,
+    frontendUrl: string | undefined,
   ): Promise<TenantMaster> {
     const existing = await this.tenantRepo.findOne({ where: { tenantCode } });
     if (existing) {
@@ -82,9 +85,11 @@ export class AuthService {
     await assertPublicHttpsApiUrl(apiUrl, ssrfConfig.allowPrivateApiUrls);
 
     try {
-      return await this.tenantRepo.save(
-        this.tenantRepo.create({ tenantName, tenantCode, apiUrl }),
+      const tenant = await this.tenantRepo.save(
+        this.tenantRepo.create({ tenantName, tenantCode, apiUrl, frontendUrl: frontendUrl ?? null }),
       );
+      if (frontendUrl) this.originRegistry.add(frontendUrl);
+      return tenant;
     } catch (error) {
       const isUniqueViolation =
         typeof error === 'object' &&
@@ -131,6 +136,7 @@ export class AuthService {
     const forwarded = { ...rawBody };
     delete forwarded[intercept.tenantNameField];
     delete forwarded[intercept.apiUrlField];
+    delete forwarded[intercept.frontendUrlField];
     delete forwarded[intercept.tenantCodeField];
 
     if (intercept.forwardTenantCodeAs) {
@@ -148,6 +154,7 @@ export class AuthService {
       fields.tenantCode,
       fields.tenantName,
       fields.apiUrl,
+      fields.frontendUrl,
     );
 
     await this.mappingRepo
@@ -243,14 +250,14 @@ export class AuthService {
     return { status: 200, body: this.swapTokensIntoUpstreamBody(upstream.body, intercept, session) };
   }
 
-  // Verifies a Google ID token and resolves it to a tenant — real, functional
-  // work, not a stub. What it deliberately does NOT do is mint a working
-  // session: the main service only understands email+password, and per this
-  // project's hard constraint (no main-service changes — see
-  // IMPLEMENTATION_PLAN.md "Core Constraints") there is no endpoint to hand it
-  // a pre-verified identity and get a session back. Returns 501 rather than
-  // faking one. See GOOGLE_SIGNIN_AND_MIDDLEWARE_INTEGRATION.md for the exact
-  // main-service endpoint spec that would let this method finish the job.
+  // Verifies a Google ID token, resolves it to a tenant, forwards it to the
+  // main service's own POST {apiUrl}{GOOGLE_PATH} (which independently
+  // re-verifies the token — this middleware's verification alone isn't
+  // trusted as an auth bypass into the main service), and mints a middleware
+  // session exactly like login()/register() do. The mapping is upserted here
+  // (not just looked up) because this may be the first time this middleware
+  // has ever seen this email — a user who has only ever signed in with
+  // Google has no prior /api/auth/register call to have created it.
   async loginWithGoogle(idToken: string, tenantCode: string): Promise<UpstreamResponse> {
     const google = this.configService.get('google', { infer: true });
     if (!google.clientId) {
@@ -282,16 +289,50 @@ export class AuthService {
       throw new BadRequestException(`Unknown or inactive tenant "${tenantCode}"`);
     }
 
-    return {
-      status: 501,
-      body: {
-        success: false,
-        message:
-          'Google Sign-In is verified but not yet usable: the main service has no endpoint to issue a session for a pre-verified identity. See GOOGLE_SIGNIN_AND_MIDDLEWARE_INTEGRATION.md.',
-        email,
-        tenantCode: tenant.tenantCode,
-      },
-    };
+    await this.mappingRepo
+      .createQueryBuilder()
+      .insert()
+      .into(UserTenantMapping)
+      .values({ username: email, tenantId: tenant.id })
+      .orIgnore()
+      .execute();
+
+    const intercept = this.configService.get('intercept', { infer: true });
+    const forwardedBody: Record<string, unknown> = { idToken };
+    if (intercept.forwardTenantCodeAs) {
+      forwardedBody[intercept.forwardTenantCodeAs] = tenant.tenantCode;
+    }
+
+    const upstream = await this.postJson(`${tenant.apiUrl}${intercept.googlePath}`, forwardedBody);
+
+    if (upstream.status < 200 || upstream.status >= 300) {
+      // Surface the main service's own rejection (invalid token, pending
+      // approval, suspended account, etc.) as-is rather than masking it.
+      return upstream;
+    }
+
+    const upstreamToken = getByDotPath(upstream.body, intercept.upstreamTokenPath);
+    if (typeof upstreamToken !== 'string' || upstreamToken.length === 0) {
+      throw new Error(
+        `Upstream Google login response did not contain a token at path "${intercept.upstreamTokenPath}"`,
+      );
+    }
+
+    const mapping = await this.mappingRepo.findOne({ where: { username: email } });
+    if (!mapping) {
+      // Unreachable in practice — the row was just inserted (or already
+      // existed) above — but fail safe rather than null-deref.
+      return upstream;
+    }
+
+    const upstreamRefreshToken = getByDotPath(upstream.body, intercept.upstreamRefreshTokenPath);
+    const session = await this.issueSession(
+      mapping,
+      tenant,
+      upstreamToken,
+      typeof upstreamRefreshToken === 'string' ? upstreamRefreshToken : undefined,
+    );
+    return { status: 200, body: this.swapTokensIntoUpstreamBody(upstream.body, intercept, session) };
   }
 
   private async issueSession(

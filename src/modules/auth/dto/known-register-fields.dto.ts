@@ -12,6 +12,7 @@ export interface KnownRegisterFields {
   tenantCode: string;
   tenantName?: string;
   apiUrl?: string;
+  frontendUrl?: string;
 }
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -23,6 +24,7 @@ export function extractKnownRegisterFields(
     tenantCodeField: string;
     tenantNameField: string;
     apiUrlField: string;
+    frontendUrlField: string;
   },
 ): KnownRegisterFields {
   const username = body[fieldNames.usernameField];
@@ -30,6 +32,7 @@ export function extractKnownRegisterFields(
   const tenantCode = body[fieldNames.tenantCodeField];
   const tenantName = body[fieldNames.tenantNameField];
   const apiUrl = body[fieldNames.apiUrlField];
+  const frontendUrl = body[fieldNames.frontendUrlField];
 
   if (typeof username !== 'string' || !EMAIL_RE.test(username)) {
     throw new BadRequestException(`${fieldNames.usernameField} must be a valid email address`);
@@ -46,6 +49,9 @@ export function extractKnownRegisterFields(
   if (apiUrl !== undefined && typeof apiUrl !== 'string') {
     throw new BadRequestException(`${fieldNames.apiUrlField} must be a string`);
   }
+  if (frontendUrl !== undefined && typeof frontendUrl !== 'string') {
+    throw new BadRequestException(`${fieldNames.frontendUrlField} must be a string`);
+  }
 
   return {
     username,
@@ -53,5 +59,6 @@ export function extractKnownRegisterFields(
     tenantCode: tenantCode.trim(),
     tenantName: tenantName as string | undefined,
     apiUrl: apiUrl as string | undefined,
+    frontendUrl: frontendUrl as string | undefined,
   };
 }

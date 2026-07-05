@@ -279,7 +279,7 @@ Main service receives:
 POST /api/auth/register     → Auth module — intercept  (upstream target is env-configurable via REGISTER_PATH)
 POST /api/auth/login        → Auth module — intercept  (upstream target is env-configurable via LOGIN_PATH)
 POST /api/auth/refresh-token → Auth module — compat alias for POST /middleware/auth/refresh
-POST /api/auth/google       → Auth module — verify-only (see "Google Sign-In" below)
+POST /api/auth/google       → Auth module — intercept  (upstream target is env-configurable via GOOGLE_PATH)
 /**                         → Proxy middleware          (transparent pass-through)
 ```
 
@@ -372,7 +372,7 @@ meet-to-manage-middleware/
 | POST   | /api/auth/register      | Create tenant (if new) + mapping, forward to main, swap token if auto-issued |
 | POST   | /api/auth/login         | Resolve apiUrl, forward creds, return reshaped response with MW tokens |
 | POST   | /api/auth/refresh-token | Compat alias for `/middleware/auth/refresh`, response wrapped in `{data:{...}}` |
-| POST   | /api/auth/google        | Verify Google ID token + resolve tenant; **501** until main service supports it — see [Google Sign-In](#google-sign-in--verify-only) |
+| POST   | /api/auth/google        | Verify Google ID token, resolve tenant, upsert mapping, forward to main, swap token — see [Google Sign-In](#google-sign-in) |
 
 ### Pass-Through
 
@@ -382,18 +382,20 @@ meet-to-manage-middleware/
 
 ---
 
-## Google Sign-In — Verify-Only
+## Google Sign-In
 
 `POST /api/auth/google` — `{ idToken, tenantCode }`
 
-This endpoint does real, complete work up to a hard stop:
+Fully functional — the main-service constraint below was later relaxed specifically for this feature (see `GOOGLE_SIGNIN_AND_MIDDLEWARE_INTEGRATION.md`, repo root of `online-class-management-platform`, for the full history and setup checklist):
 
 1. Verifies the Google ID token's signature, issuer, and audience (`GOOGLE_CLIENT_ID`) via `google-auth-library`.
 2. Confirms the email is present and Google-verified (`email_verified: true`).
 3. Resolves `tenantCode` to an active `TenantMaster` row (same multi-tenant model as register/login — a Google token proves *identity*, not *which tenant*).
-4. **Stops here and returns `501`.** There is no step 5 that mints a working session, because the main service only authenticates via email+password — it has no endpoint to accept a pre-verified identity and hand back a session. Per this project's Core Constraint #1 (no main-service changes), that endpoint does not exist, so this method does not fabricate one.
+4. Upserts `user_tenant_mapping` for this email → tenant (idempotent — this may be the first time this middleware has ever seen this email, if the user has only ever signed in with Google).
+5. Forwards `{ idToken, [FORWARD_TENANT_CODE_AS]: tenantCode }` to `{api_url}{GOOGLE_PATH}` — the main service **independently re-verifies the same ID token itself** (this middleware's verification is not trusted as an auth bypass on its own) and either logs in an existing user or auto-provisions one, per its own business rules.
+6. Same token-swap treatment as login/register: the main service's response envelope is preserved, only the token value(s) get replaced with a middleware session.
 
-See `GOOGLE_SIGNIN_AND_MIDDLEWARE_INTEGRATION.md` (repo root of `online-class-management-platform`) for the exact main-service endpoint spec that would let this finish the job, and for what changed in each frontend.
+`GOOGLE_PATH` (env, default `/auth/google`) controls the upstream forwarding path, same pattern as `REGISTER_PATH`/`LOGIN_PATH`.
 
 ---
 

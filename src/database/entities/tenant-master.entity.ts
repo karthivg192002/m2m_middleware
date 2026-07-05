@@ -24,6 +24,12 @@ export class TenantMaster {
   @Column({ name: 'api_url', type: 'text' })
   apiUrl: string;
 
+  // Captured once, at first-user registration for a new tenant (same as
+  // apiUrl) — lets a newly self-registered tenant's frontend origin be
+  // allowed through CORS immediately, without an env var change + redeploy.
+  @Column({ name: 'frontend_url', type: 'text', nullable: true })
+  frontendUrl: string | null;
+
   @Column({ name: 'is_active', type: 'boolean', default: true })
   isActive: boolean;
 

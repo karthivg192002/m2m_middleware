@@ -23,11 +23,13 @@ export interface AppConfig {
   intercept: {
     registerPath: string;
     loginPath: string;
+    googlePath: string;
     upstreamRefreshPath: string;
     usernameField: string;
     tenantCodeField: string;
     tenantNameField: string;
     apiUrlField: string;
+    frontendUrlField: string;
     forwardTenantCodeAs: string | null;
     upstreamTokenPath: string;
     upstreamRefreshTokenPath: string;
@@ -121,11 +123,13 @@ export default (): AppConfig => {
     intercept: {
       registerPath: process.env.REGISTER_PATH ?? '/auth/register',
       loginPath: process.env.LOGIN_PATH ?? '/auth/login',
+      googlePath: process.env.GOOGLE_PATH ?? '/auth/google',
       upstreamRefreshPath: process.env.UPSTREAM_REFRESH_PATH ?? '',
       usernameField: process.env.USERNAME_FIELD ?? 'email',
       tenantCodeField: process.env.TENANT_CODE_FIELD ?? 'tenantCode',
       tenantNameField: process.env.TENANT_NAME_FIELD ?? 'tenantName',
       apiUrlField: process.env.API_URL_FIELD ?? 'apiUrl',
+      frontendUrlField: process.env.FRONTEND_URL_FIELD ?? 'frontendUrl',
       forwardTenantCodeAs: process.env.FORWARD_TENANT_CODE_AS || null,
       upstreamTokenPath: process.env.UPSTREAM_TOKEN_PATH ?? 'accessToken',
       upstreamRefreshTokenPath:

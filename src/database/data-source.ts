@@ -14,6 +14,10 @@ export const AppDataSource = new DataSource({
   password: process.env.DB_PASSWORD ?? 'password',
   database: process.env.DB_NAME ?? 'mtm_middleware',
   entities: [TenantMaster, UserTenantMapping],
-  migrations: ['src/database/migrations/*.ts'],
+  // __dirname-relative with both extensions: resolves to src/migrations/*.ts
+  // under ts-node (local dev: migration:generate/run/revert) and to
+  // dist/migrations/*.js when run from the compiled output (production
+  // entrypoint — see docker-entrypoint.sh) — same data source, both contexts.
+  migrations: [__dirname + '/migrations/*{.ts,.js}'],
   synchronize: false,
 });
