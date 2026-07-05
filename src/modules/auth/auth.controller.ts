@@ -13,7 +13,6 @@ import { Response } from 'express';
 import { AuthService } from './auth.service';
 import { RefreshDto } from './dto/refresh.dto';
 import { LogoutDto } from './dto/logout.dto';
-import { extractKnownGoogleFields } from './dto/known-google-fields.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { MiddlewareJwtPayload } from './jwt-payload.interface';
@@ -69,15 +68,11 @@ export class AuthController {
     return { success: true, message: 'Token refreshed successfully', data: session };
   }
 
-  // Verify-only for now — see AuthService.loginWithGoogle() and
-  // GOOGLE_SIGNIN_AND_MIDDLEWARE_INTEGRATION.md. Returns 501 until the main
-  // service exposes an endpoint to issue a session for a pre-verified identity.
   @Post('api/auth/google')
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @HttpCode(200)
   async google(@Body() body: Record<string, unknown>, @Res() res: Response): Promise<void> {
-    const { idToken, tenantCode } = extractKnownGoogleFields(body);
-    const result = await this.authService.loginWithGoogle(idToken, tenantCode);
+    const result = await this.authService.loginWithGoogle(body);
     res.status(result.status).json(result.body);
   }
 

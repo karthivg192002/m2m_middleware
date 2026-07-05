@@ -17,6 +17,7 @@ import {
   extractKnownRegisterFields,
 } from './dto/known-register-fields.dto';
 import { extractKnownLoginFields } from './dto/known-login-fields.dto';
+import { extractKnownGoogleFields } from './dto/known-google-fields.dto';
 import {
   MiddlewareJwtPayload,
   RefreshJwtPayload,
@@ -258,7 +259,10 @@ export class AuthService {
   // (not just looked up) because this may be the first time this middleware
   // has ever seen this email — a user who has only ever signed in with
   // Google has no prior /api/auth/register call to have created it.
-  async loginWithGoogle(idToken: string, tenantCode: string): Promise<UpstreamResponse> {
+  async loginWithGoogle(rawBody: Record<string, unknown>): Promise<UpstreamResponse> {
+    const intercept = this.configService.get('intercept', { infer: true });
+    const fields = extractKnownGoogleFields(rawBody, intercept);
+
     const google = this.configService.get('google', { infer: true });
     if (!google.clientId) {
       throw new BadRequestException(
@@ -269,7 +273,7 @@ export class AuthService {
     let email: string;
     try {
       const ticket = await this.googleClient.verifyIdToken({
-        idToken,
+        idToken: fields.idToken,
         audience: google.clientId,
       });
       const payload = ticket.getPayload();
@@ -284,9 +288,11 @@ export class AuthService {
       throw new UnauthorizedException('Invalid Google ID token');
     }
 
-    const tenant = await this.tenantRepo.findOne({ where: { tenantCode, isActive: true } });
+    const tenant = await this.tenantRepo.findOne({
+      where: { tenantCode: fields.tenantCode, isActive: true },
+    });
     if (!tenant) {
-      throw new BadRequestException(`Unknown or inactive tenant "${tenantCode}"`);
+      throw new BadRequestException(`Unknown or inactive tenant "${fields.tenantCode}"`);
     }
 
     await this.mappingRepo
@@ -297,8 +303,7 @@ export class AuthService {
       .orIgnore()
       .execute();
 
-    const intercept = this.configService.get('intercept', { infer: true });
-    const forwardedBody: Record<string, unknown> = { idToken };
+    const forwardedBody: Record<string, unknown> = { idToken: fields.idToken };
     if (intercept.forwardTenantCodeAs) {
       forwardedBody[intercept.forwardTenantCodeAs] = tenant.tenantCode;
     }
