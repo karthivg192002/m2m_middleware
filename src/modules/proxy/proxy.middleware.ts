@@ -1,7 +1,7 @@
 import { Injectable, NestMiddleware, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
-import { createProxyMiddleware, RequestHandler } from 'http-proxy-middleware';
+import { createProxyMiddleware, fixRequestBody, RequestHandler } from 'http-proxy-middleware';
 import { NextFunction, Request, Response } from 'express';
 import { AppConfig } from '../../config/configuration';
 import { RedisService } from '../../redis/redis.service';
@@ -30,6 +30,11 @@ export class ProxyMiddleware implements NestMiddleware {
       xfwd: true, // append this hop to X-Forwarded-For so the main service can see the real client IP, not just this middleware's
       ws: false, // WebSocket/Socket.IO traffic is explicitly out of scope — see IMPLEMENTATION_PLAN.md
       proxyTimeout: 15_000,
+      // The global express.json()/urlencoded() body parsers (main.ts) already
+      // consume the request stream before this middleware runs, so without
+      // re-serializing req.body here, proxied PUT/POST/PATCH requests reach
+      // the upstream with an empty body and eventually time out.
+      onProxyReq: fixRequestBody,
       onError: (_err: Error, _req: Request, res: Response) => {
         res.status(502).json({ message: 'Upstream unavailable' });
       },
